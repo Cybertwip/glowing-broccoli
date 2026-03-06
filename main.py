@@ -726,7 +726,7 @@ while running:
     # Blit cached base frame then draw overlay on a copy (cache untouched)
     base=get_frame(S.t_var,S.p_wx,S.p_wy,S.p_r,S.cr,S.cg,S.cb,S.mode)
     frame=base.copy()
-    _draw_overlay(frame, now)
+    # _draw_overlay(frame, now)
 
     screen.blit(frame,(0,0))
     pygame.display.flip()
