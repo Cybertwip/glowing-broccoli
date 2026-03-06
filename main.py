@@ -460,6 +460,46 @@ def _maybe_flush(now):
         rows=_log_buf.copy(); _log_buf.clear(); _last_fl=now
         threading.Thread(target=_flush_csv, args=(rows,), daemon=True).start()
 
+# ── Console telemetry (10 Hz tick, written off hot-path) ──────────────────
+_CONSOLE_EVERY = 10.0
+_last_console  = 0.0
+_stdout_write  = sys.stdout.write   # local ref — avoids global lookup each call
+
+# ANSI helpers (no-op on Windows without VT mode, harmless either way)
+_RST  = "\033[0m"
+_BOLD = "\033[1m"
+_GRN  = "\033[32m"; _YLW = "\033[33m"; _RED = "\033[31m"; _CYN = "\033[36m"
+
+def _strain_color(v):
+    if v < 40:  return _GRN
+    if v < 70:  return _YLW
+    return _RED
+
+def _console_log(now):
+    global _last_console
+    if now - _last_console < _CONSOLE_EVERY: return
+    _last_console = now
+
+    rem  = TwentyTwenty.remaining()
+    mins = int(rem) // 60; secs = int(rem) % 60
+    sc   = _strain_color(EyeStrain.composite)
+    hid  = f"{_YLW}HIDDEN{_RST}" if S.hidden else f"{_GRN}VISIBLE{_RST}"
+
+    # Single pre-formatted write — one syscall, zero f-string fragments on hot path
+    _stdout_write(
+        f"{_BOLD}[{time.strftime('%H:%M:%S')}]{_RST} "
+        f"state={_CYN}{S.state:<11}{_RST} "
+        f"break={_BOLD}{mins:02d}:{secs:02d}{_RST} "
+        f"strain={sc}{EyeStrain.composite:5.1f}%{_RST} "
+        f"ciliary={sc}{EyeStrain.ciliary:5.1f}%{_RST} "
+        f"blink={EyeStrain.blink_supp:5.1f}% "
+        f"tremor={EyeStrain.tremor:5.1f}% "
+        f"RH={Photo.RH:5.1f}% "
+        f"EFF={Photo.EFF:.3f} "
+        f"breaks={TwentyTwenty.breaks_taken} "
+        f"{hid}\n"
+    )
+
 # ── Linear regression (5-tier) ────────────────────────────────────────────
 def _predict(data, future=0, tier=0):
     nt=len(data)
@@ -655,6 +695,7 @@ while running:
             compute(now); last_eval=now
 
         _maybe_flush(now)
+        _console_log(now)
         clock.tick(4)
         continue
 
@@ -668,6 +709,7 @@ while running:
         compute(now); last_eval=now
 
     _maybe_flush(now)
+    _console_log(now)
     _optomotor_flee(now)
 
     S.win_x+=(S.tgt_x-S.win_x)*0.05
