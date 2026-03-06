@@ -104,8 +104,8 @@ def _cos(r): return _COS[int(r * _LUT_K) % _LUT]
 def _sin(r): return _SIN[int(r * _LUT_K) % _LUT]
 
 # ── 20-20-20 / break config ───────────────────────────────────────────────
-NEAR_FOCUS_BUDGET   = 20 * 60.0   # seconds of near-focus before break
-BREAK_DURATION      = 20.0        # seconds of far-focus rest
+NEAR_FOCUS_BUDGET   = 2 * 60.0   # seconds of near-focus before break
+BREAK_DURATION      = 2.0        # seconds of far-focus rest
 RECOVERY_CHECK_SECS = 2.0         # RH / strain check interval while hidden
 CILIARY_BREAK_EARLY = 70.0        # CiliaryStrain early-break threshold
 STRAIN_BREAK_EARLY  = 75.0        # composite strain early-break threshold
