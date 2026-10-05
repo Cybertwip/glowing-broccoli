@@ -78,6 +78,28 @@ $$\frac{dRH}{dt} = K_{BIND} \cdot CI \cdot D - K_{BL} \cdot I_n \cdot RH - K_{SC
 | **CORRECTIVE**| 2D+3D blend | Cyan-green | [cite_start]Saccadic reset [cite: 75] |
 | **TYPING** | 2D ambient | Deep indigo | [cite_start]Peripheral stimulation [cite: 75] |
 
+### 5.4 Vision-Hygiene Techniques (`vision_techniques.py`)
+Pure, headless-testable helpers that override the base pattern from live strain
+(see `tests/test_vision_techniques.py`). Selection priority: blink breaks first,
+then accommodative rock for ciliary fatigue, then state-specific drills.
+
+| Technique | Trigger | What the user does |
+| :--- | :--- | :--- |
+| **Accommodative rock** | Ciliary strain ≥ 60% | Follow the dot as it swells (near) and shrinks (far) on a 6 s cycle |
+| **Saccade grid** | CORRECTIVE state | Flick eyes to the bright dot of a 3×3 grid (0.8 s dwell, corners first) |
+| **Figure-8 pursuit** | READING state | Track the leader dot smoothly around a figure-8 with head still |
+| **Peripheral ring** | IDLE state | Fixate the centre dot; notice the 12 twinkling outer dots |
+| **Blink break** | Blink suppression ≥ 50%, every 20 s ambient, and every hidden break | 10 slow full blinks, then gaze ~20 ft away for 20 s |
+
+The overlay labels the active exercise, flashes BLINK prompts, and moves the
+countdown off-centre during fixation exercises so the central target stays clear.
+The active technique is logged to the `exercise` column of `cognitive_log.csv`
+and the console `ex=` field.
+
+> Comfort exercises only — not medical advice. Nothing here changes refractive
+> error (myopia, hyperopia, astigmatism). Stop if you feel dizzy or get a
+> headache, and see an eye-care professional for vision problems.
+
 ---
 
 ## 6. Optimization & Control

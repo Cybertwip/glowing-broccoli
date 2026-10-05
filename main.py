@@ -466,12 +466,16 @@ def _draw_overlay(surface, now):
         end_a   = math.pi * 0.5
         pygame.draw.arc(surface, ca, _ARC_REF, start_a, end_a, _ARC_T + 1)
 
-    # Countdown text MM:SS
+    # Countdown text MM:SS — kept off-centre during fixation exercises
+    # (accommodative rock / peripheral ring need a clear central target).
     mins = int(rem) // 60
     secs = int(rem) % 60
     txt  = _FONT_SM.render(f"{mins:02d}:{secs:02d}", True, ca)
     tw, th = txt.get_size()
-    surface.blit(txt, (CX - tw//2, CY - th//2))
+    if S.mode in (MODE_ACCOM, MODE_PERIPH):
+        surface.blit(txt, (CX - tw // 2, H - th - max(5, int(H * 0.07))))
+    else:
+        surface.blit(txt, (CX - tw//2, CY - th//2))
 
     # Bottom composite-strain fill bar
     bar_w = int(EyeStrain.composite / 100.0 * W)
