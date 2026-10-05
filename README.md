@@ -125,6 +125,20 @@ indices 0–2 (default + AVFoundation backends), prints which index works, and
 suggests the exact `--camera-index` flag — or permission / busy-camera fixes
 when nothing works.
 
+### 5.6 Input-listener health (`input_health.py`)
+On macOS the keyboard/mouse listeners need the terminal app under System
+Settings → Privacy & Security → Accessibility, otherwise macOS sends no
+events. The widget detects this: it prints an accessibility hint at startup
+when untrusted, and marks dead listeners in the console (`in=DEAD(kb+mouse)`)
+and the `input` CSV column. While the mouse listener is dead, the optomotor
+flee is paused (it would otherwise jump on frozen coordinates) and the camera
+(if enabled) keeps blink/presence signals working.
+
+The widget also warms pyobjc's `HIServices.AXIsProcessTrusted` symbol on the
+main thread before starting listeners: pynput touches it from both listener
+threads at startup, and concurrent first-touch races inside pyobjc's lazy
+importer (`KeyError: 'AXIsProcessTrusted'`, killing one listener).
+
 ---
 
 ## 6. Optimization & Control
