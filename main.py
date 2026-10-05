@@ -43,6 +43,11 @@ Overlay on every visible frame:
 All previous fixes retained:
   t_var mod 2pi (LRU cache cycles), Welford M2 fix, CSV daemon thread,
   t_b key wraps mod TCYCLE, optomotor flee, 4-Hz idle while hidden.
+
+Visual techniques (see vision_techniques.py):
+  accommodative rock (near/far), figure-8 pursuit, saccade grid,
+  peripheral ring, blink breaks. Comfort exercises only — not medical
+  advice; nothing here changes refractive error.
 """
 
 import pygame
@@ -50,6 +55,7 @@ import pygame._sdl2.video as sdl2_video
 import math, sys, os, time, csv, threading
 from collections import deque, OrderedDict
 from pynput import mouse, keyboard
+import vision_techniques as VT
 
 try:
     from AppKit import NSApp, NSApplicationActivationPolicyAccessory
@@ -117,6 +123,16 @@ OPTOMOTOR_COOL    = 2.5
 _ANCHOR_L = 20.0
 _ANCHOR_R = float(SCREEN_W - W - 20)
 
+# ── Visual-technique config ───────────────────────────────────────────────
+# Render modes (extend the 0=2D / 1=3D / 2=blend set; cache keys include mode)
+MODE_2D, MODE_3D, MODE_BLEND = 0, 1, 2
+MODE_ACCOM, MODE_SACCADE, MODE_FIG8, MODE_PERIPH = 3, 4, 5, 6
+ACCOM_PERIOD = 6.0       # one full near/far cycle fits the ~6.3 s cache loop
+FIG8_SPEED   = 1.0       # one full figure-8 per cache loop
+SACCADE_DWELL = 0.8      # seconds per saccade target
+BLINK_REMIND_EVERY = 20.0  # seconds between ambient blink prompts
+BLINK_FLASH_SECS   = 2.0   # how long the BLINK overlay shows
+
 # ── State ─────────────────────────────────────────────────────────────────
 class S:
     cr=35.0; cg=0.0; cb=50.0
@@ -136,6 +152,7 @@ class S:
     t_var=0.0
     hidden=False; hide_until=0.0; hide_reason=""
     opto_last_t=0.0; mouse_in_t=0.0; mouse_in=False
+    exercise=VT.NONE; last_blink_prompt=0.0; blink_flash_until=0.0
 
 # ── Photo (rhodopsin) ODE ─────────────────────────────────────────────────
 class Photo:
@@ -337,8 +354,64 @@ def _make_surface(key, t, ax, ay, br, fr, fg, fb, mode):
                 sz=max(2,int(sr*proj*0.012*SCALE))
                 _dc(surf,(int(fr*fd),int(fg*fd),int(fb*fd)),(px,py),sz)
 
-    if mode==0:   _d2()
-    elif mode==1: _d3()
+    def _d_accom():
+        # Near/far target: dot grows + ring closes for NEAR, reverse for FAR.
+        scale, _lbl = VT.accom_scale(t, period=ACCOM_PERIOD)
+        _dc(surf, (int(fr*0.35), int(fg*0.35), int(fb*0.35)),
+            (CX, CY), int(sr * 0.85), 2)
+        mid_r = int(sr * (0.65 - 0.30 * scale))
+        _dc(surf, (int(fr*0.6), int(fg*0.6), int(fb*0.6)),
+            (CX, CY), max(4, mid_r), 2)
+        dot_r = max(3, int(br * (0.6 + 1.8 * scale)))
+        _dc(surf, (int(fr), int(fg), int(fb)), (CX, CY), dot_r)
+
+    def _d_saccade():
+        # 3x3 refixation grid; one bright target, rest dim.
+        col, row = VT.saccade_target(VT.saccade_index(t, dwell=SACCADE_DWELL))
+        mgn = W * 0.18
+        step = (W - 2.0 * mgn) / 2.0
+        for r in range(3):
+            for c in range(3):
+                x = int(mgn + c * step); y = int(mgn + r * step)
+                if c == col and r == row:
+                    _dc(surf, (int(fr), int(fg), int(fb)), (x, y),
+                        max(4, int(br * 1.4)))
+                else:
+                    _dc(surf, (int(fr*0.3), int(fg*0.3), int(fb*0.3)),
+                        (x, y), max(2, int(br * 0.5)))
+
+    def _d_fig8():
+        # Figure-8 pursuit: fading trail + bright leader dot.
+        for k in range(23, -1, -1):
+            dx, dy = VT.figure8_pos(t - k * 0.06, ax, ay, speed=FIG8_SPEED)
+            x = int(CX + dx); y = int(CY + dy)
+            if 0 <= x <= W and 0 <= y <= H:
+                fd = 1.0 - k / 24.0
+                rr = max(2, int(br * (0.4 + 0.6 * fd))) if k else max(4, int(br * 1.3))
+                _dc(surf, (int(fr*(0.25+0.75*fd)),
+                            int(fg*(0.25+0.75*fd)),
+                            int(fb*(0.25+0.75*fd))), (x, y), rr)
+
+    def _d_periph():
+        # Central fixation + twinkling peripheral ring.
+        _dc(surf, (int(fr), int(fg), int(fb)), (CX, CY), max(3, int(br)))
+        n = 12
+        ring_r = int(W * 0.36)
+        for i in range(n):
+            ang = i * _TWO_PI / n
+            x = CX + int(_cos(ang) * ring_r)
+            y = CY + int(_sin(ang) * ring_r)
+            b = VT.peripheral_twinkle(t, i, count=n)
+            fd = 0.2 + 0.8 * b
+            _dc(surf, (int(fr*fd), int(fg*fd), int(fb*fd)),
+                (x, y), max(2, int(br * 0.6)))
+
+    if mode==MODE_2D:         _d2()
+    elif mode==MODE_3D:       _d3()
+    elif mode==MODE_ACCOM:    _d_accom()
+    elif mode==MODE_SACCADE:  _d_saccade()
+    elif mode==MODE_FIG8:     _d_fig8()
+    elif mode==MODE_PERIPH:   _d_periph()
     else:
         half=max(4,int(S.p_n)>>1)
         _d2(half); _d3(half)
@@ -410,6 +483,19 @@ def _draw_overlay(surface, now):
     dot_r = max(2, int(EyeStrain.ciliary / 100.0 * W * 0.06))
     pygame.draw.circle(surface, ca, (W - dot_r - 3, dot_r + 3), dot_r)
 
+    # Active exercise label (top strip) so the user knows what to do.
+    if S.exercise and S.exercise != VT.NONE:
+        lbl = _FONT_XS.render(S.exercise.replace("_", " "), True, ca)
+        surface.blit(lbl, (4, 2))
+
+    # Blink prompt flash — unmissable, brief.
+    if now < S.blink_flash_until:
+        flash = 0.6 + 0.4 * math.sin(now * 10.0)
+        bc = tuple(int(c * flash) for c in (255, 255, 255))
+        btxt = _FONT_SM.render("BLINK", True, bc)
+        bw, bh = btxt.get_size()
+        surface.blit(btxt, (CX - bw // 2, int(H * 0.12)))
+
 # ── Input listeners ───────────────────────────────────────────────────────
 _mx = _my = 0
 _last_key   = 0.0
@@ -451,7 +537,7 @@ _lw.writerow(["ts","state","tier","mode",
               "BC","RL","CI","RH","efficacy","pred_fatigue",
               "mouse_speed","scroll_stress","var_x","var_y","side","hidden",
               "ciliary","blink_supp","tremor","strain",
-              "near_secs","break_rem","breaks"])
+              "near_secs","break_rem","breaks","exercise"])
 
 def _flush_csv(rows): _lw.writerows(rows); _lf.flush()
 def _maybe_flush(now):
