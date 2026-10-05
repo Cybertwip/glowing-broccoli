@@ -80,9 +80,15 @@ def _parse_args(argv=None):
                         "silent fallback to input proxies on any failure")
     p.add_argument("--camera-index", type=int, default=0, metavar="N",
                    help="webcam device index (default 0)")
+    p.add_argument("--check-camera", action="store_true",
+                   help="probe webcam indices, print a diagnostic report, exit")
     return p.parse_args(argv)
 
 ARGS = _parse_args()
+
+if ARGS.check_camera:
+    ET.print_camera_report(ET.probe_cameras())
+    sys.exit(0)
 
 os.environ["SDL_VIDEO_WINDOW_POS"] = "20,20"
 pygame.init()

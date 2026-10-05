@@ -108,6 +108,69 @@ class TestNullAndFactory(unittest.TestCase):
         self.assertFalse(t.read().valid)  # not started → invalid
 
 
+class _StubCap:
+    """Cap-like object replaying scripted read() results."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.released = False
+
+    def read(self):
+        if self._script:
+            return self._script.pop(0)
+        return False, None
+
+    def release(self):
+        self.released = True
+
+
+class _FakeFrame:
+    def __init__(self, size=10, shape=(240, 320, 3)):
+        self.size = size
+        self.shape = shape
+
+
+class TestReadFrame(unittest.TestCase):
+    def test_immediate_frame(self):
+        f = _FakeFrame()
+        self.assertIs(ET._read_frame(_StubCap([(True, f)]), 3, 0.0), f)
+
+    def test_fail_then_frame(self):
+        f = _FakeFrame()
+        cap = _StubCap([(False, None), (True, None), (True, f)])
+        self.assertIs(ET._read_frame(cap, 3, 0.0), f)
+
+    def test_all_fail_returns_none(self):
+        cap = _StubCap([(False, None), (True, None)])
+        self.assertIsNone(ET._read_frame(cap, 5, 0.0))
+
+    def test_empty_frame_rejected(self):
+        cap = _StubCap([(True, _FakeFrame(size=0))])
+        self.assertIsNone(ET._read_frame(cap, 1, 0.0))
+
+    def test_read_exception_returns_none(self):
+        class _Boom:
+            def read(self):
+                raise RuntimeError("boom")
+        self.assertIsNone(ET._read_frame(_Boom(), 2, 0.0))
+
+
+class TestProbeCameras(unittest.TestCase):
+    def test_invalid_index_structure(self):
+        res = ET.probe_cameras(indices=[99])
+        self.assertEqual(len(res), 1)
+        r = res[0]
+        self.assertEqual(r["index"], 99)
+        for key in ("backend", "opened", "frame_ok", "shape", "error"):
+            self.assertIn(key, r)
+        self.assertFalse(r["opened"])
+        self.assertFalse(r["frame_ok"])
+
+    def test_report_never_raises(self):
+        ET.print_camera_report([])
+        ET.print_camera_report(ET.probe_cameras(indices=[99]))
+
+
 class TestEyeTrackerFallback(unittest.TestCase):
     def test_invalid_index_stays_invalid(self):
         t = ET.EyeTracker(index=99)

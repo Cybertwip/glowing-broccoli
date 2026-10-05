@@ -115,9 +115,15 @@ presence and blinks at ~12 Hz:
 Privacy: frames are processed in memory and discarded — no preview, no
 recording, no transmission. Any failure (missing opencv, denied/busy/missing
 camera, read errors) prints one warning and silently falls back to the
-mouse/keyboard proxies. macOS shows a camera-permission prompt on first use.
+mouse/keyboard proxies; a `tracking started` line confirms recovery. macOS
+shows a camera-permission prompt on first use.
 Limitations: coarse Haar detection needs decent frontal lighting; glasses,
 extreme angles, or dark rooms reduce blink accuracy.
+
+If tracking never starts, run `python3 main.py --check-camera`: it probes
+indices 0–2 (default + AVFoundation backends), prints which index works, and
+suggests the exact `--camera-index` flag — or permission / busy-camera fixes
+when nothing works.
 
 ---
 

@@ -23,6 +23,10 @@ CAPTURE_HZ = 12.0
 FRAME_WIDTH = 320
 OPEN_RETRY_SECS = 5.0
 STOP_JOIN_SECS = 2.0
+WARMUP_ATTEMPTS = 10    # reads to wait out camera warmup after open
+WARMUP_SLEEP = 0.1      # pause between warmup reads
+READ_RETRIES = 3        # per-frame read retries before declaring failure
+PROBE_INDICES = (0, 1, 2)  # device indices scanned by --check-camera
 
 # Smoothing / blink tuning.
 PRESENCE_TIMEOUT = 1.5    # face still "present" if seen within this window
@@ -158,11 +162,14 @@ class EyeTracker:
 
     def _set(self, valid, face_present=False, blinks_total=0, reason=""):
         with self._lock:
+            prev_valid = self._reading.valid
             self._reading = GazeReading(valid, face_present, blinks_total)
             if reason:
                 self._reason = reason
-        # One stderr-free console note per distinct failure (silent fallback).
-        if not valid and reason and reason != self._warned_reason:
+        # Confirm recovery, and note each distinct failure once (silent fallback).
+        if valid and not prev_valid:
+            print(f"[camera] tracking started (index {self._index})")
+        elif not valid and reason and reason != self._warned_reason:
             self._warned_reason = reason
             print(f"[camera] {reason} — falling back to input proxies")
 
@@ -191,21 +198,30 @@ class EyeTracker:
                 last_open_attempt = t0
                 cap = self._try_open(cv2)
                 if cap is None:
-                    self._set(False, reason="camera unavailable (denied/busy/missing)")
+                    self._set(False, reason=(
+                        f"index {self._index}: camera unavailable "
+                        f"(denied/busy/missing/wrong index)"))
                     time.sleep(pace)
+                    continue
+                # Warmup: freshly opened cameras often yield empty frames
+                # for ~1 s; wait them out instead of reporting failure.
+                if _read_frame(cap, WARMUP_ATTEMPTS, WARMUP_SLEEP) is None:
+                    self._release(cap)
+                    cap = None
+                    self._set(False, reason=(
+                        f"index {self._index}: opened but no frames "
+                        f"(another app holding the camera?)"))
                     continue
             if cap is None:
                 time.sleep(pace)
                 continue
 
-            ok, frame = cap.read()
-            if not ok:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
+            frame = _read_frame(cap, READ_RETRIES, 0.0)
+            if frame is None:
+                self._release(cap)
                 cap = None
-                self._set(False, reason="camera read failed")
+                self._set(False, reason=(
+                    f"index {self._index}: camera read failed"))
                 continue
 
             face_seen, eyes_seen = self._detect(cv2, frame,
@@ -220,10 +236,7 @@ class EyeTracker:
             time.sleep(max(0.0, pace - spent))
 
         if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
+            self._release(cap)
 
     @staticmethod
     def _load_cascades(cv2):
@@ -237,17 +250,34 @@ class EyeTracker:
         except Exception:
             return None, None
 
-    def _try_open(self, cv2):
+    @staticmethod
+    def _release(cap):
         try:
-            cap = cv2.VideoCapture(self._index)
-            if not cap.isOpened():
-                return None
-            # Small frames: detection is cheaper, still plenty for blinks.
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_WIDTH * 3 // 4)
-            return cap
+            cap.release()
         except Exception:
-            return None
+            pass
+
+    def _try_open(self, cv2):
+        # Default backend first, then AVFoundation (macOS cameras sometimes
+        # need it explicitly — open succeeds but reads fail otherwise).
+        attempts = [(self._index,)]
+        if hasattr(cv2, "CAP_AVFOUNDATION"):
+            attempts.append((self._index, cv2.CAP_AVFOUNDATION))
+        for args in attempts:
+            try:
+                cap = cv2.VideoCapture(*args)
+            except Exception:
+                continue
+            try:
+                if not cap.isOpened():
+                    continue
+                # Small frames: detection is cheaper, still plenty for blinks.
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_WIDTH * 3 // 4)
+                return cap
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _detect(cv2, frame, face_cascade, eye_cascade):
@@ -279,6 +309,102 @@ class EyeTracker:
         except Exception:
             return True, False
         return True, len(eyes) >= 1
+
+
+def _read_frame(cap, attempts, sleep_secs):
+    """Read one non-empty frame with retries; None if all attempts fail."""
+    for _ in range(max(1, attempts)):
+        try:
+            ok, frame = cap.read()
+        except Exception:
+            ok, frame = False, None
+        if ok and frame is not None and getattr(frame, "size", 0):
+            return frame
+        if sleep_secs > 0:
+            time.sleep(sleep_secs)
+    return None
+
+
+def probe_cameras(indices=None):
+    """Probe webcam indices; returns a list of result dicts. Never raises.
+
+    Each result has keys: index, backend ("default"/"avfoundation"/"none"),
+    opened (bool), frame_ok (bool), shape (frame shape or None).
+    Opens each device only long enough for a warmup read, then releases it.
+    """
+    results = []
+    try:
+        import cv2
+    except ImportError:
+        return [{"index": i, "backend": "none", "opened": False,
+                 "frame_ok": False, "shape": None,
+                 "error": "opencv (cv2) not installed"}
+                for i in (indices if indices is not None else PROBE_INDICES)]
+    for i in indices if indices is not None else PROBE_INDICES:
+        entry = {"index": i, "backend": "none", "opened": False,
+                 "frame_ok": False, "shape": None, "error": ""}
+        backends = [(), ("avfoundation",)] if hasattr(
+            cv2, "CAP_AVFOUNDATION") else [()]
+        for be in backends:
+            try:
+                if be:
+                    cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                    name = "avfoundation"
+                else:
+                    cap = cv2.VideoCapture(i)
+                    name = "default"
+            except Exception as exc:
+                entry["error"] = f"open raised {exc}"
+                continue
+            try:
+                if not cap.isOpened():
+                    entry["error"] = "open failed"
+                    continue
+                entry["opened"] = True
+                entry["backend"] = name
+                frame = _read_frame(cap, WARMUP_ATTEMPTS, WARMUP_SLEEP)
+                if frame is None:
+                    entry["error"] = "opened but no frames"
+                    continue
+                entry["frame_ok"] = True
+                try:
+                    entry["shape"] = tuple(frame.shape)
+                except Exception:
+                    entry["shape"] = None
+                break
+            finally:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+        results.append(entry)
+    return results
+
+
+def print_camera_report(results):
+    """Print a human-readable probe report with next-step hints."""
+    print("Camera probe (opens each device briefly; nothing is stored):")
+    if results and results[0].get("error") == "opencv (cv2) not installed":
+        print("  opencv (cv2) not installed — run: pip install opencv-python")
+        return
+    working = [r for r in results if r["frame_ok"]]
+    for r in results:
+        if r["frame_ok"]:
+            status = f"OK ({r['backend']}, frame {r['shape']})"
+        elif r["opened"]:
+            status = f"opens but no frames [{r['error']}]"
+        else:
+            status = f"unavailable [{r['error'] or 'no device'}]"
+        print(f"  index {r['index']}: {status}")
+    if working:
+        best = working[0]["index"]
+        print(f"Run with: python3 main.py --enable-camera --camera-index {best}")
+    else:
+        print("No working camera found. Try:")
+        print("  - macOS: allow the camera permission prompt (System Settings → "
+              "Privacy & Security → Camera) and re-run")
+        print("  - Close other apps holding the camera (Zoom/Teams/browsers)")
+        print("  - Unplug/replug external webcams, then re-run --check-camera")
 
 
 def create_tracker(enabled, index=0):
