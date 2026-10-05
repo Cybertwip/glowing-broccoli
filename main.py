@@ -64,6 +64,7 @@ from collections import deque, OrderedDict
 from pynput import mouse, keyboard
 import vision_techniques as VT
 import eye_tracker as ET
+import input_health as IH
 
 try:
     from AppKit import NSApp, NSApplicationActivationPolicyAccessory
@@ -184,6 +185,7 @@ class S:
     opto_last_t=0.0; mouse_in_t=0.0; mouse_in=False
     exercise=VT.NONE; last_blink_prompt=0.0; blink_flash_until=0.0
     cam_valid=False; face_present=True; _cam_blinks_seen=0; face_absent_since=0.0
+    kb_alive=True; mouse_alive=True
 
 # ── Photo (rhodopsin) ODE ─────────────────────────────────────────────────
 class Photo:
@@ -555,7 +557,19 @@ def _on_press(_k):          global _last_key;  _last_key=time.time()
 
 _kb = keyboard.Listener(on_press=_on_press)
 _ml = mouse.Listener(on_move=_on_move, on_click=_on_click, on_scroll=_on_scroll)
-_kb.start(); _ml.start()
+
+# Warm the pyobjc trust symbol on THIS thread first: pynput's listeners both
+# touch HIServices.AXIsProcessTrusted at startup, and concurrent first-touch
+# races inside objc._lazyimport (KeyError kills one listener).
+_INPUT_TRUST = IH.warm_darwin_trust_cache()
+if _INPUT_TRUST == IH.UNTRUSTED:
+    print(IH.access_hint())
+for _lname, _lis in (("kb", _kb), ("mouse", _ml)):
+    try:
+        _lis.start()
+    except Exception as exc:
+        print(f"[input] {_lname} listener failed to start ({exc})")
+_input_sup = IH.ListenerSupervisor()
 
 # ── Welford online variance ───────────────────────────────────────────────
 class Welford:
@@ -585,7 +599,7 @@ _lw.writerow(["ts","state","tier","mode",
               "mouse_speed","scroll_stress","var_x","var_y","side","hidden",
               "ciliary","blink_supp","tremor","strain",
               "near_secs","break_rem","breaks","exercise",
-              "face","cam_blinks"])
+              "face","cam_blinks","input"])
 
 def _flush_csv(rows): _lw.writerows(rows); _lf.flush()
 def _maybe_flush(now):
@@ -620,6 +634,9 @@ def _console_log(now):
     hid  = f"{_YLW}HIDDEN{_RST}" if S.hidden else f"{_GRN}VISIBLE{_RST}"
     cam_s = (f"face={'Y' if S.face_present else 'n'} "
              f"cblink={S._cam_blinks_seen} ") if S.cam_valid else ""
+    _dead = [n for n, a in (("kb", S.kb_alive),
+                            ("mouse", S.mouse_alive)) if not a]
+    in_s = f"in=DEAD({'+'.join(_dead)}) " if _dead else ""
 
     # Single pre-formatted write — one syscall, zero f-string fragments on hot path
     _stdout_write(
@@ -635,6 +652,7 @@ def _console_log(now):
         f"breaks={TwentyTwenty.breaks_taken} "
         f"ex={S.exercise} "
         f"{cam_s}"
+        f"{in_s}"
         f"{hid}\n"
     )
 
@@ -672,6 +690,12 @@ def compute(now):
 
     dt       = max(0.001, now - _last_eval_t)
     _last_eval_t = now
+
+    # ── Input-listener health (cheap liveness poll, each death logged once) ─
+    _alive, _newly = _input_sup.poll({"kb": _kb, "mouse": _ml})
+    S.kb_alive, S.mouse_alive = _alive["kb"], _alive["mouse"]
+    if _newly:
+        print(IH.format_input_warning(_newly, _INPUT_TRUST))
 
     vx=_wfx.var(); vy=_wfy.var(); speed=_dist_acc
     _wfx.reset(); _wfy.reset(); _dist_acc=0.0; _samp_n=0
@@ -808,11 +832,15 @@ def compute(now):
         TwentyTwenty.breaks_taken, S.exercise,
         ("1" if S.face_present else "0") if S.cam_valid else "",
         S._cam_blinks_seen if S.cam_valid else "",
+        ("dead:" + "+".join(
+            n for n, a in (("kb", S.kb_alive), ("mouse", S.mouse_alive))
+            if not a)) if not (S.kb_alive and S.mouse_alive) else "ok",
     ))
 
 # ── Optomotor flee ────────────────────────────────────────────────────────
 def _optomotor_flee(now):
     if S.hidden: return
+    if not S.mouse_alive: return  # coords frozen — never flee on stale data
     if now-S.opto_last_t<OPTOMOTOR_COOL: return
     wx=S.win_x; wy=S.win_y
     wcx=wx+W*0.5; wcy=wy+H*0.5
@@ -929,5 +957,10 @@ while running:
 # ── Shutdown ──────────────────────────────────────────────────────────────
 if _log_buf: _lw.writerows(_log_buf)
 _tracker.stop()
-_lf.close(); _kb.stop(); _ml.stop()
+_lf.close()
+for _lis in (_kb, _ml):
+    try:
+        _lis.stop()
+    except Exception:
+        pass  # never-started / already-dead listener
 pygame.quit(); sys.exit()
