@@ -100,6 +100,25 @@ and the console `ex=` field.
 > error (myopia, hyperopia, astigmatism). Stop if you feel dizzy or get a
 > headache, and see an eye-care professional for vision problems.
 
+### 5.5 Optional Camera Tracking (`eye_tracker.py`)
+Run with `python3 main.py --enable-camera` (add `--camera-index N` if the
+default webcam is not index 0). An OpenCV Haar-cascade thread detects face
+presence and blinks at ~12 Hz:
+
+* A camera-observed blink resets the stare accumulator immediately, so the
+  blink-suppression score reflects real blinking instead of the keyboard proxy.
+* Face absence sustained for > 10 s pauses 20-20-20 accrual and runs the
+  recovery step (camera-confirmed away from screen counts as rest).
+* The overlay shows a green/red presence dot; the console `face=`/`cblink=`
+  fields and the `face`/`cam_blinks` CSV columns log the signal.
+
+Privacy: frames are processed in memory and discarded — no preview, no
+recording, no transmission. Any failure (missing opencv, denied/busy/missing
+camera, read errors) prints one warning and silently falls back to the
+mouse/keyboard proxies. macOS shows a camera-permission prompt on first use.
+Limitations: coarse Haar detection needs decent frontal lighting; glasses,
+extreme angles, or dark rooms reduce blink accuracy.
+
 ---
 
 ## 6. Optimization & Control

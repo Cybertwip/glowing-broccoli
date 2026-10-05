@@ -48,20 +48,41 @@ Visual techniques (see vision_techniques.py):
   accommodative rock (near/far), figure-8 pursuit, saccade grid,
   peripheral ring, blink breaks. Comfort exercises only — not medical
   advice; nothing here changes refractive error.
+
+Optional camera (see eye_tracker.py, --enable-camera):
+  OpenCV blink + presence tracking. Real blinks reset the stare
+  accumulator; sustained camera-confirmed absence pauses near-focus
+  accrual. Frames are processed in memory and discarded — nothing is
+  displayed, recorded, or transmitted. Any camera failure silently
+  falls back to the mouse/keyboard proxies.
 """
 
 import pygame
 import pygame._sdl2.video as sdl2_video
-import math, sys, os, time, csv, threading
+import argparse, math, sys, os, time, csv, threading
 from collections import deque, OrderedDict
 from pynput import mouse, keyboard
 import vision_techniques as VT
+import eye_tracker as ET
 
 try:
     from AppKit import NSApp, NSApplicationActivationPolicyAccessory
     _MAC = True
 except ImportError:
     _MAC = False
+
+# ── CLI flags (parsed before pygame init so --help works headless) ─────────
+def _parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="Adaptive peripheral visual-comfort widget.")
+    p.add_argument("--enable-camera", action="store_true",
+                   help="track blinks + face presence via webcam (OpenCV); "
+                        "silent fallback to input proxies on any failure")
+    p.add_argument("--camera-index", type=int, default=0, metavar="N",
+                   help="webcam device index (default 0)")
+    return p.parse_args(argv)
+
+ARGS = _parse_args()
 
 os.environ["SDL_VIDEO_WINDOW_POS"] = "20,20"
 pygame.init()
@@ -133,6 +154,9 @@ SACCADE_DWELL = 0.8      # seconds per saccade target
 BLINK_REMIND_EVERY = 20.0  # seconds between ambient blink prompts
 BLINK_FLASH_SECS   = 2.0   # how long the BLINK overlay shows
 
+# ── Camera config ───────────────────────────────────────────────────────────
+CAM_AWAY_AFTER = 10.0  # sustained face absence before pausing near-focus accrual
+
 # ── State ─────────────────────────────────────────────────────────────────
 class S:
     cr=35.0; cg=0.0; cb=50.0
@@ -153,6 +177,7 @@ class S:
     hidden=False; hide_until=0.0; hide_reason=""
     opto_last_t=0.0; mouse_in_t=0.0; mouse_in=False
     exercise=VT.NONE; last_blink_prompt=0.0; blink_flash_until=0.0
+    cam_valid=False; face_present=True; _cam_blinks_seen=0; face_absent_since=0.0
 
 # ── Photo (rhodopsin) ODE ─────────────────────────────────────────────────
 class Photo:
@@ -224,6 +249,12 @@ class EyeStrain:
           + 0.20 * cls.tremor
           + 0.20 * (100.0 - Photo.RH)
         )
+
+    @classmethod
+    def register_real_blink(cls):
+        """Camera-observed blink: eyes just re-wetted, stare is over."""
+        cls._stare_secs = 0.0
+        cls.blink_supp = 0.0
 
     @classmethod
     def recover_step(cls, dt):
@@ -487,6 +518,12 @@ def _draw_overlay(surface, now):
     dot_r = max(2, int(EyeStrain.ciliary / 100.0 * W * 0.06))
     pygame.draw.circle(surface, ca, (W - dot_r - 3, dot_r + 3), dot_r)
 
+    # Bottom-left camera dot (only with --enable-camera): green = face
+    # present, red = absent. No image is ever shown or stored.
+    if S.cam_valid:
+        cc = (80, 255, 120) if S.face_present else (255, 80, 80)
+        pygame.draw.circle(surface, cc, (8, H - 16), 4)
+
     # Active exercise label (top strip) so the user knows what to do.
     if S.exercise and S.exercise != VT.NONE:
         lbl = _FONT_XS.render(S.exercise.replace("_", " "), True, ca)
@@ -541,7 +578,8 @@ _lw.writerow(["ts","state","tier","mode",
               "BC","RL","CI","RH","efficacy","pred_fatigue",
               "mouse_speed","scroll_stress","var_x","var_y","side","hidden",
               "ciliary","blink_supp","tremor","strain",
-              "near_secs","break_rem","breaks","exercise"])
+              "near_secs","break_rem","breaks","exercise",
+              "face","cam_blinks"])
 
 def _flush_csv(rows): _lw.writerows(rows); _lf.flush()
 def _maybe_flush(now):
@@ -574,6 +612,8 @@ def _console_log(now):
     mins = int(rem) // 60; secs = int(rem) % 60
     sc   = _strain_color(EyeStrain.composite)
     hid  = f"{_YLW}HIDDEN{_RST}" if S.hidden else f"{_GRN}VISIBLE{_RST}"
+    cam_s = (f"face={'Y' if S.face_present else 'n'} "
+             f"cblink={S._cam_blinks_seen} ") if S.cam_valid else ""
 
     # Single pre-formatted write — one syscall, zero f-string fragments on hot path
     _stdout_write(
@@ -588,6 +628,7 @@ def _console_log(now):
         f"EFF={Photo.EFF:.3f} "
         f"breaks={TwentyTwenty.breaks_taken} "
         f"ex={S.exercise} "
+        f"{cam_s}"
         f"{hid}\n"
     )
 
@@ -691,9 +732,30 @@ def compute(now):
         S.t_wx,S.t_wy,S.t_sp=ma*0.35,ma*0.35,0.12
         S.t_mode=2; S.lerp=0.05; S.tgt_y=20.0
 
+    # ── Camera poll (non-blocking; invalid unless --enable-camera works) ──
+    cam = _tracker.read()
+    S.cam_valid = cam.valid
+    if cam.valid:
+        S.face_present = cam.face_present
+        if cam.blinks_total > S._cam_blinks_seen:
+            S._cam_blinks_seen = cam.blinks_total
+            EyeStrain.register_real_blink()
+    if cam.valid and not cam.face_present:
+        if S.face_absent_since == 0.0:
+            S.face_absent_since = now
+    else:
+        S.face_absent_since = 0.0
+    # Sustained absence gates the away-state: a mis-aimed camera must never
+    # silently pause the 20-20-20 scheduler on brief detection gaps.
+    cam_away = (cam.valid and S.face_absent_since != 0.0
+                and now - S.face_absent_since > CAM_AWAY_AFTER)
+
     # ── Eye strain + 20-20-20 ─────────────────────────────────────────────
-    EyeStrain.step(S.state, vx, vy, dt, last_key_age)
-    TwentyTwenty.accrue(S.state, dt)
+    if cam_away:
+        EyeStrain.recover_step(dt)  # camera-confirmed away ≈ rest
+    else:
+        EyeStrain.step(S.state, vx, vy, dt, last_key_age)
+        TwentyTwenty.accrue(S.state, dt)
 
     # ── Visual-technique override (uses fresh strain values) ──────────────
     S.exercise = VT.recommend_technique(
@@ -738,6 +800,8 @@ def compute(now):
         f"{EyeStrain.tremor:.2f}",f"{EyeStrain.composite:.2f}",
         f"{TwentyTwenty.near_secs:.1f}",f"{TwentyTwenty.remaining():.1f}",
         TwentyTwenty.breaks_taken, S.exercise,
+        ("1" if S.face_present else "0") if S.cam_valid else "",
+        S._cam_blinks_seen if S.cam_valid else "",
     ))
 
 # ── Optomotor flee ────────────────────────────────────────────────────────
@@ -765,6 +829,10 @@ def _optomotor_flee(now):
     S.opto_last_t=now; S.mouse_in=False
     print(f"[optomotor] flee → x={S.tgt_x:.0f}  dist={dist:.0f} dwell={dwell_trigger}")
 
+# ── Camera tracker (NullTracker unless --enable-camera) ───────────────────
+_tracker = ET.create_tracker(ARGS.enable_camera, ARGS.camera_index)
+_tracker.start()
+
 # ── Main loop ─────────────────────────────────────────────────────────────
 clock      = pygame.time.Clock()
 last_eval  = time.time()
@@ -774,6 +842,11 @@ print(f"[widget] proactive 20-20-20 | ciliary ODE | blink proxy | optomotor | lo
 print(f"[widget] budget={NEAR_FOCUS_BUDGET/60:.0f} min | break={BREAK_DURATION:.0f} s | "
       f"ciliary-thresh={CILIARY_BREAK_EARLY:.0f} | strain-thresh={STRAIN_BREAK_EARLY:.0f}")
 print(f"[widget] techniques: {', '.join(VT.ALL_TECHNIQUES)}")
+if ARGS.enable_camera:
+    print(f"[camera] enabled (index={ARGS.camera_index}) — silent fallback "
+          f"to input proxies on any failure")
+else:
+    print("[camera] disabled — run with --enable-camera for blink/presence tracking")
 print(f"[disclaimer] {VT.DISCLAIMER}")
 S.last_blink_prompt = time.time()
 
@@ -849,5 +922,6 @@ while running:
 
 # ── Shutdown ──────────────────────────────────────────────────────────────
 if _log_buf: _lw.writerows(_log_buf)
+_tracker.stop()
 _lf.close(); _kb.stop(); _ml.stop()
 pygame.quit(); sys.exit()
