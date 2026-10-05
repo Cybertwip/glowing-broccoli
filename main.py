@@ -583,6 +583,7 @@ def _console_log(now):
         f"RH={Photo.RH:5.1f}% "
         f"EFF={Photo.EFF:.3f} "
         f"breaks={TwentyTwenty.breaks_taken} "
+        f"ex={S.exercise} "
         f"{hid}\n"
     )
 
@@ -606,6 +607,7 @@ def _hide_window(reason, duration):
     S.hidden=True; S.hide_until=time.time()+duration; S.hide_reason=reason
     window.position=(_OFF_X, 0)
     print(f"[widget] HIDDEN {duration:.0f}s — {reason}")
+    print(f"[break] {VT.describe(VT.BLINK_BREAK)}")
 
 def _show_window():
     S.hidden=False; window.position=(int(S.win_x), int(S.win_y))
@@ -685,11 +687,26 @@ def compute(now):
         S.t_wx,S.t_wy,S.t_sp=ma*0.35,ma*0.35,0.12
         S.t_mode=2; S.lerp=0.05; S.tgt_y=20.0
 
-    S.mode=S.t_mode
-
     # ── Eye strain + 20-20-20 ─────────────────────────────────────────────
     EyeStrain.step(S.state, vx, vy, dt, last_key_age)
     TwentyTwenty.accrue(S.state, dt)
+
+    # ── Visual-technique override (uses fresh strain values) ──────────────
+    S.exercise = VT.recommend_technique(
+        S.state, EyeStrain.ciliary, EyeStrain.composite, EyeStrain.blink_supp)
+    if S.exercise == VT.ACCOMMODATIVE_ROCK:
+        S.t_mode = MODE_ACCOM; S.lerp = 0.08
+        S.t_wx, S.t_wy = ma * 0.5, ma * 0.5
+    elif S.exercise == VT.SACCADE_GRID:
+        S.t_mode = MODE_SACCADE; S.lerp = 0.2
+    elif S.exercise == VT.FIGURE8_PURSUIT:
+        S.t_mode = MODE_FIG8; S.lerp = 0.1
+        S.t_wx, S.t_wy = ma * 0.9, ma * 0.45
+    elif S.exercise == VT.PERIPHERAL_RING:
+        S.t_mode = MODE_PERIPH; S.lerp = 0.05
+    elif S.exercise == VT.BLINK_BREAK:
+        S.blink_flash_until = now + BLINK_FLASH_SECS
+    S.mode = S.t_mode
 
     # ── Proactive break decision ──────────────────────────────────────────
     should, reason = TwentyTwenty.should_break()
@@ -716,7 +733,7 @@ def compute(now):
         f"{EyeStrain.ciliary:.2f}",f"{EyeStrain.blink_supp:.2f}",
         f"{EyeStrain.tremor:.2f}",f"{EyeStrain.composite:.2f}",
         f"{TwentyTwenty.near_secs:.1f}",f"{TwentyTwenty.remaining():.1f}",
-        TwentyTwenty.breaks_taken,
+        TwentyTwenty.breaks_taken, S.exercise,
     ))
 
 # ── Optomotor flee ────────────────────────────────────────────────────────
@@ -752,6 +769,9 @@ _prev_mx   = _mx; _prev_my=_my
 print(f"[widget] proactive 20-20-20 | ciliary ODE | blink proxy | optomotor | log→{_LOG}")
 print(f"[widget] budget={NEAR_FOCUS_BUDGET/60:.0f} min | break={BREAK_DURATION:.0f} s | "
       f"ciliary-thresh={CILIARY_BREAK_EARLY:.0f} | strain-thresh={STRAIN_BREAK_EARLY:.0f}")
+print(f"[widget] techniques: {', '.join(VT.ALL_TECHNIQUES)}")
+print(f"[disclaimer] {VT.DISCLAIMER}")
+S.last_blink_prompt = time.time()
 
 running=True
 while running:
@@ -798,6 +818,11 @@ while running:
     _console_log(now)
     _optomotor_flee(now)
 
+    # Ambient blink reminder — fires even when strain is low (dryness habit).
+    if VT.blink_due(S.last_blink_prompt, now, interval=BLINK_REMIND_EVERY):
+        S.last_blink_prompt = now
+        S.blink_flash_until = now + BLINK_FLASH_SECS
+
     S.win_x+=(S.tgt_x-S.win_x)*0.05
     S.win_y+=(S.tgt_y-S.win_y)*0.05
     window.position=(int(S.win_x),int(S.win_y))
@@ -812,7 +837,7 @@ while running:
     # Blit cached base frame then draw overlay on a copy (cache untouched)
     base=get_frame(S.t_var,S.p_wx,S.p_wy,S.p_r,S.cr,S.cg,S.cb,S.mode)
     frame=base.copy()
-    # _draw_overlay(frame, now)
+    _draw_overlay(frame, now)
 
     screen.blit(frame,(0,0))
     pygame.display.flip()
